@@ -32,7 +32,7 @@
 void unix_error(char *msg) /* Unix-style error */
 {
     fprintf(stderr, "%s: %s\n", msg, strerror(errno));
-    exit(0);
+    // exit(0);
 }
 /* $end unixerror */
 
@@ -45,7 +45,7 @@ void posix_error(int code, char *msg) /* Posix-style error */
 void gai_error(int code, char *msg) /* Getaddrinfo-style error */
 {
     fprintf(stderr, "%s: %s\n", msg, gai_strerror(code));
-    exit(0);
+    // exit(0);
 }
 
 void app_error(char *msg) /* Application error */
@@ -781,9 +781,12 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
     while (nleft > 0) {
 	if ((nwritten = write(fd, bufp, nleft)) <= 0) {
 	    if (errno == EINTR)  /* Interrupted by sig handler return */
-		nwritten = 0;    /* and call write() again */
-	    else
-		return -1;       /* errno set by write() */
+		  nwritten = 0;    /* and call write() again */
+        else if (errno == EPIPE) { /* EDIT: announce EPIPE error at the proxy */
+            printf("EPIPE error.\n");
+            return -1;
+        } else
+		  return -1;       /* errno set by write() */
 	}
 	nleft -= nwritten;
 	bufp += nwritten;
@@ -810,6 +813,9 @@ static ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n)
 	rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, 
 			   sizeof(rp->rio_buf));
 	if (rp->rio_cnt < 0) {
+        if (errno == ECONNRESET) { /* EDIT: treat prematurely closed socket as EOF */
+            return 0;
+        }
 	    if (errno != EINTR) /* Interrupted by sig handler return */
 		return -1;
 	}
