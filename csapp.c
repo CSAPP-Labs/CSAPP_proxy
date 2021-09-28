@@ -783,7 +783,7 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
 	    if (errno == EINTR)  /* Interrupted by sig handler return */
 		  nwritten = 0;    /* and call write() again */
         else if (errno == EPIPE) { /* EDIT: announce EPIPE error at the proxy */
-            printf("EPIPE error.\n");
+            // printf("EPIPE error.\n");
             return -1;
         } else
 		  return -1;       /* errno set by write() */

@@ -72,24 +72,27 @@
 // static const char *user_agent_hdr_alt = "User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0\r\n";
 static char user_agent_hdr_alt[MAXLINE];
 
+/* HTTP functionality */
 int readparse_request(int fd, char *targethost, char *path, char *request_toserver, char *port, char *method, rio_t *rp);
 void parse_url(char *url, char *host, char *abs_path, char *port);
 void forward_requesthdrs(rio_t *rp, int fd);
 void send_request(int server_connfd, char *request_toserver, char *targethost);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 void send_r_and_h(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client); 
+void send_binary(int destfd, int srcfd, int filesize);
+
 
 /* $begin main */
 int main(int argc, char **argv)
 {
 
-    int listenfd, client_connfd, server_connfd, rio_cnt;
+    int listenfd, client_connfd, server_connfd, rio_cnt, content_length;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
     rio_t rio_client, rio_toserver; /* or initiate new rio struct in each iteration? */
     char hostname[MAXLINE], port[MAXLINE], targethost[MAXLINE], path[MAXLINE], 
     			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[6],
-    			request_method[64];
+    			request_method[64], content_type[MAXLINE];
 
     /* initialize user agent without \r\n and header title of "User-Agent" */
 	strcpy(user_agent_hdr_alt, "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0");
@@ -141,27 +144,49 @@ int main(int argc, char **argv)
         /* set up rio buffer to read server responses */
         Rio_readinitb(&rio_toserver, server_connfd); /* proxy can only start reading server responses here */
         if ( (rio_cnt = Rio_readlineb(&rio_toserver, server_buf, MAXLINE)) != 0 ) { /* status code from server */
-	        printf("Server response status: \n");
-	        printf("%s\r\n\r\n",server_buf);
+	        printf("Server response status (first response header): \n");
+	        printf("%s\r\n",server_buf);
 	        Rio_writen(client_connfd, server_buf, strlen(server_buf));
     	}
 
-    	/* also need to copy binaries, images and videos from server to client. 
-    	 * need to decide based on URL which resources need to be served, what
-    	 * the appropriate filetype is, when the server is done sending headers,
-    	 * and when it started sending a stream of binary bytes; to be copied
-    	 * via mmap()
-    	 */
 
-    	/* write server responses to client */
+    	/* write server response headers as text, to client */
+    	printf("Server headers: \n");
+    	strcpy(content_type, "");
+		// strcpy(content_length, "");
+		content_length = -1;
         while ( (rio_cnt = Rio_readlineb(&rio_toserver, server_buf, MAXLINE)) != 0 ) {
-        	// printf("%s", server_buf);
-        	Rio_writen(client_connfd, server_buf, strlen(server_buf));
+        	printf("%s", server_buf); /* proxy printout of response headers */
+        	Rio_writen(client_connfd, server_buf, strlen(server_buf)); /* write text to client from server buffer */
 
-        	/* should detect HEAD method and send only the response headers to client*/
-        	// if (strstr(request_method, "HEAD") && ((strstr(server_buf, "\r\n\r\n"))) )
-        	// 	break;
+        	/* determine incoming content type and length */
+        	if (strstr(server_buf, "Content-Length")) {
+        		sscanf(server_buf, "Content-Length: %d", &content_length); /* returns 1 at match */
+        		// printf("%d\n", content_length);        		
+        	} else if (strstr(server_buf, "Content-Type")) {
+        		sscanf(server_buf, "Content-Type: %s", content_type);
+	        	// printf("%s\n", content_type);
+        	} else {}
+
+        	/* detect end of server's response headers; HEAD method stops writing to client here */
+        	if (!(strcmp(server_buf, "\r\n")) ) {
+        		// strcpy(server_buf, "\r\n\r\n");
+        		// Rio_writen(client_connfd, server_buf, strlen(server_buf));
+        		printf("End of server headers.\n");
+        		if (strstr(content_type, "image")) { /* in case the data is a binary (like image), copy it */
+        			printf("Sending binary data of length %d\n", content_length);
+        			send_binary(client_connfd, server_connfd, content_length);
+        			printf("After attempt to send.\n");
+        			break;
+        		}
+
+        		// break;
+        	}
+
+
+        	/* detect other methods? */
         }
+
 
         /* close socket with server, then close socket with client */
         Close(server_connfd);
@@ -250,7 +275,6 @@ void parse_url(char *url, char *host, char *abs_path, char *port)
     }
 
     /* clear path, then formulate path */
-    // strcpy(abs_path, "");
     strcat(abs_path, suffix); // printf("h: %s| pt: %s | ph: %s\n", host, port, abs_path);
     return;
 }
@@ -268,6 +292,7 @@ void forward_requesthdrs(rio_t *rp, int fd)
     {
         Rio_readlineb(rp, buf, MAXLINE);
         Rio_writen(fd, buf, strlen(buf));
+
         printf("%s", buf);
 
         /* potential intercession for non-GET requests would go here */
@@ -304,6 +329,34 @@ void send_request(int server_connfd, char *request_toserver, char *targethost)
     return;
 }
 /* $end send_request */
+
+/*
+ * send_binary - sends server binary data back to client
+ */
+/* $begin send_binary */
+void send_binary(int client_connfd, int server_connfd, int filesize) 
+{
+	char *srcp;
+	int n;
+
+    /* in case of binary data, send response body to client via copying? 
+     * presumably mmap can't be used because it can't iteratively read 
+     * from a server the way read would. */
+    srcp = (char *)Malloc(filesize);
+    n = Rio_readn(server_connfd, srcp, filesize);   /* read from file into the allocated srcp "buffer" memory block */
+    printf("Read data of size %d\n", (int)n);
+    Rio_writen(client_connfd, srcp, filesize);     /* write from srcp into client */
+
+    free(srcp);
+
+    return;
+}
+/* $end send_binary */ 
+
+
+
+
+
 
 
 /*
@@ -365,6 +418,8 @@ void send_r_and_h(int server_connfd, char *request_toserver, char *targethost, r
     printf("%s", proxy_toserver);
     printf("Request headers forwarded from client, to server: \n");
     printf("%s", client_toserver);
+    printf("End of request headers from client, to server: \n");
+
 
     /* send mandatory headers by proxy, forward the rest from client. */   
     Rio_writen(server_connfd, proxy_toserver, strlen(proxy_toserver));
