@@ -58,6 +58,8 @@
  * http://neverssl.com/
  * http://www.testingmcafeesites.com/
  *
+ * http://http://www.apimages.com/
+ *
  */
 
 #include <stdio.h>
@@ -69,36 +71,31 @@
 
 /* You won't lose style points for including this long line in your code */
 // static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
-// static const char *user_agent_hdr_alt = "User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0\r\n";
-static char user_agent_hdr_alt[MAXLINE];
+static const char *user_agent_hdr_alt = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0";
+static const char *accept_header = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+static const char *accept_encoding_header = "gzip, deflate";
 
 /* HTTP functionality */
-int readparse_request(int fd, char *targethost, char *path, char *request_toserver, char *port, char *method, rio_t *rp);
+int readparse_request(int fd, char *targethost, char *path, char *port, char *method, 
+	char *request_toserver, rio_t *rp);
 void parse_url(char *url, char *host, char *abs_path, char *port);
-void forward_requesthdrs(rio_t *rp, int fd);
-void send_request(int server_connfd, char *request_toserver, char *targethost);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
-void send_r_and_h(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client); 
-void send_binary(int destfd, int srcfd, int filesize);
+void send_request(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client);
+void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd);
+
+void debug_status(rio_t *rp, int client_connfd);
+void identify_client(const struct sockaddr *sa, socklen_t clientlen);
 
 
 /* $begin main */
 int main(int argc, char **argv)
 {
-
     int listenfd, client_connfd, server_connfd, rio_cnt, content_length;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
-    rio_t rio_client, rio_toserver; /* or initiate new rio struct in each iteration? */
-    char hostname[MAXLINE], port[MAXLINE], targethost[MAXLINE], path[MAXLINE], 
-    			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[6],
-    			request_method[64], content_type[MAXLINE];
-
-    /* initialize user agent without \r\n and header title of "User-Agent" */
-	strcpy(user_agent_hdr_alt, "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0");
-
-	/* ignore SIGPIPE signals by flagging it with SIG_IGN */
-	Signal(SIGPIPE, SIG_IGN);
+    rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
+    char targethost[MAXLINE], path[MAXLINE], 
+    			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
+    			request_method[64];
 
 	/* Check command line args */
     if (argc != 2) {
@@ -106,8 +103,11 @@ int main(int argc, char **argv)
 		exit(1);
     }
 
+	/* ignore SIGPIPE signals */
+	Signal(SIGPIPE, SIG_IGN);
+
     /* sequential proxy: waits for contact by client, services a request, closes connection */
-    listenfd = Open_listenfd(argv[1]); /* port passed to proxy at cmdline argv[1]; exit if error */
+    listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid */
     while (1) {
     	/* accept incoming connections */
     	clientlen = sizeof(clientaddr);
@@ -116,79 +116,24 @@ int main(int argc, char **argv)
     		continue;
     	}
 
-    	/* obtain client info; not necessary for basic proxy tasks */
-        Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
-                    port, MAXLINE, 0);
-        printf("PROXY: Accepted connection from client (%s, %s)\n", hostname, port);
+    	/* debugging, obtain client info; not necessary for basic proxy tasks */
+    	identify_client((SA *) &clientaddr, clientlen);
 
-        /* read request; extract the host/path/port requested by client 
-         * set up the client-facing I/O buffer from rio package 
-         * ignore requests which are not implemented.
-         */
-    	if  (readparse_request(client_connfd, targethost, path, request_toserver, 
-        			server_port, request_method, &rio_client) < 0) 
-    		continue;
+        /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
+    	if  (readparse_request(client_connfd, targethost, path, 
+        			server_port, request_method, request_toserver, &rio_client) < 0) 
+    		continue; /* move on to next request if unsuccessful */
 
         /* proxy performs a client role: connect to the server */
 		if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
-			continue;
+			continue; /* move on to next request if unsuccessful */
 
-		/* send method+resource+version request + mandatory headers, 
-		 * then forward request headers from client line by line */
-		// send_request(server_connfd, request_toserver, targethost);
-		// forward_requesthdrs(&rio_client, server_connfd); 
+	    /* send request, check and modify mandatory headers then send all headers to server */  
+	    send_request(server_connfd, request_toserver, targethost, &rio_client);
 
-	    /* send request, check and modify mandatory headers then send all headers to server */ 
-	    send_r_and_h(server_connfd, request_toserver, targethost, &rio_client);
+	    /* set up server-facing I/O buffer; write server response to client */
+	    forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
 
-        /* set up rio buffer to read server responses */
-        Rio_readinitb(&rio_toserver, server_connfd); /* proxy can only start reading server responses here */
-        if ( (rio_cnt = Rio_readlineb(&rio_toserver, server_buf, MAXLINE)) != 0 ) { /* status code from server */
-	        printf("Server response status (first response header): \n");
-	        printf("%s\r\n",server_buf);
-	        Rio_writen(client_connfd, server_buf, strlen(server_buf));
-    	}
-
-
-    	/* write server response headers as text, to client */
-    	printf("Server headers: \n");
-    	strcpy(content_type, "");
-		// strcpy(content_length, "");
-		content_length = -1;
-        while ( (rio_cnt = Rio_readlineb(&rio_toserver, server_buf, MAXLINE)) != 0 ) {
-        	printf("%s", server_buf); /* proxy printout of response headers */
-        	Rio_writen(client_connfd, server_buf, strlen(server_buf)); /* write text to client from server buffer */
-
-        	/* determine incoming content type and length */
-        	if (strstr(server_buf, "Content-Length")) {
-        		sscanf(server_buf, "Content-Length: %d", &content_length); /* returns 1 at match */
-        		// printf("%d\n", content_length);        		
-        	} else if (strstr(server_buf, "Content-Type")) {
-        		sscanf(server_buf, "Content-Type: %s", content_type);
-	        	// printf("%s\n", content_type);
-        	} else {}
-
-        	/* detect end of server's response headers; HEAD method stops writing to client here */
-        	if (!(strcmp(server_buf, "\r\n")) ) {
-        		// strcpy(server_buf, "\r\n\r\n");
-        		// Rio_writen(client_connfd, server_buf, strlen(server_buf));
-        		printf("End of server headers.\n");
-        		if (strstr(content_type, "image")) { /* in case the data is a binary (like image), copy it */
-        			printf("Sending binary data of length %d\n", content_length);
-        			send_binary(client_connfd, server_connfd, content_length);
-        			printf("After attempt to send.\n");
-        			break;
-        		}
-
-        		// break;
-        	}
-
-
-        	/* detect other methods? */
-        }
-
-
-        /* close socket with server, then close socket with client */
         Close(server_connfd);
     	Close(client_connfd);
     }
@@ -206,36 +151,33 @@ int main(int argc, char **argv)
  * version HTTP/1.0. 
  */
 /* $begin readparse_request */
-int readparse_request(int fd, char *targethost, char *path, char *request_toserver, char *port, char *request_method, rio_t *rp)
+int readparse_request(int fd, char *targethost, char *path, char *port, char *request_method, char *request_toserver, rio_t *rp)
 {
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
 
-    /* clear buffers */
-    strcpy(request_toserver, ""); strcpy(path, ""); strcpy(targethost, ""); strcpy(port, ""); strcpy(request_method, "");
+    /* clear caller buffers */
+    strcpy(path, ""); strcpy(targethost, ""); strcpy(port, ""); strcpy(request_method, "");
 
     /* Read request line and headers */
     Rio_readinitb(rp, fd);
     if (!Rio_readlineb(rp, buf, MAXLINE))  
-        return 0;
+        return 0; /* nothing to read */
+
     sscanf(buf, "%s %s %s", method, uri, version);  
     printf("PROXY: Request of method [%s] received from client:\n%s", method, buf);    
     if (/*strcasecmp(method, "GET") != 0*/ !strstr(method,"GET")) {   
-        clienterror(fd, method, "501", "Not Implemented",
-                    "Method not implemented by Web Proxy");
         printf("PROXY: Request of method [%s] not implemented; ignored.\n", method);    
         return -1;
     }                                                   
-
     parse_url(uri, targethost, path, port);
-    strcpy(version, "HTTP/1.0");     /* proxy version always sends HTTP/1.0 */
     strcpy(request_method, method);
 
-    /* build the request line */
-    sprintf(request_toserver, "%s %s %s", method, path, version); /* may need terminating with "\r\n" */
-    return 0;
+    strcpy(request_toserver, ""); 
+	sprintf(request_toserver, "%s %s HTTP/1.0\r\n", request_method, path);
+
+    return 0; /* request extracted */
 }
 /* $end readparse_request */
-
 
 /*
  * parse_url - parse URI into targethost and path
@@ -258,11 +200,6 @@ void parse_url(char *url, char *host, char *abs_path, char *port)
 		exit(0);
 		return;
 	}
-	if (strchr(scheme, 's')) { /* https */
-		printf("PROXY: ERROR: can't serve https requests. \n");
-		exit(0);
-		return;
-	}
 
 	/* extract port if specified; otherwise default TCP port=80 */
     if (strchr(authority, ':') != NULL) {	
@@ -275,130 +212,31 @@ void parse_url(char *url, char *host, char *abs_path, char *port)
     }
 
     /* clear path, then formulate path */
-    strcat(abs_path, suffix); // printf("h: %s| pt: %s | ph: %s\n", host, port, abs_path);
+    strcat(abs_path, suffix); 
     return;
 }
 /* $end parse_url */
 
 /*
- * forward_requesthdrs - read HTTP request headers
- */
-/* $begin forward_requesthdrs */
-void forward_requesthdrs(rio_t *rp, int fd) 
-{
-    char buf[MAXLINE];
-    printf("Forwarding the following request headers from client: \n");
-    do
-    {
-        Rio_readlineb(rp, buf, MAXLINE);
-        Rio_writen(fd, buf, strlen(buf));
-
-        printf("%s", buf);
-
-        /* potential intercession for non-GET requests would go here */
-
-    } while (strcmp(buf, "\r\n")); /* should detect the end of the request as defined by client */
-
-    return;
-}
-/* $end forward_requesthdrs */
-
-/*
- * send_request - sends request and conventional request headers to server
- * line by line
+ * send_request - sends request + proxy headers + client headers
+ * RFC2616: ordering of headers only matters if multiple headers of same name
  */
 /* $begin send_request */
-void send_request(int server_connfd, char *request_toserver, char *targethost) 
+void send_request(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client) 
 {
-	char buf[MAXLINE];
+	char buf[MAXLINE], buf_client[MAXLINE], proxy_toserver[MAXLINE], client_toserver[MAXLINE];
+	printf("Request sent by proxy, to client:\n%s\n", request_toserver);
 
-	sprintf(buf, "%s\r\n", request_toserver); printf("%s", buf);
-    Rio_writen(server_connfd, buf, strlen(buf));
-
-    printf("Sending the following request headers by proxy: \n");
-    /* correction needed: find the host header that the browser uses, and use that one */
-    sprintf(buf, "Host: %s\r\n", targethost); printf("%s", buf);
-    Rio_writen(server_connfd, buf, strlen(buf));
-    sprintf(buf, "User-Agent: %s\r\n", user_agent_hdr_alt); printf("%s", buf);
-    Rio_writen(server_connfd, buf, strlen(buf));
-    sprintf(buf, "Connection: %s\r\n", "close"); printf("%s", buf);
-    Rio_writen(server_connfd, buf, strlen(buf));
-    sprintf(buf, "Proxy-Connection: %s\r\n", "close"); printf("%s", buf);
-    Rio_writen(server_connfd, buf, strlen(buf)); 
-
-    return;
-}
-/* $end send_request */
-
-/*
- * send_binary - sends server binary data back to client
- */
-/* $begin send_binary */
-void send_binary(int client_connfd, int server_connfd, int filesize) 
-{
-	char *srcp;
-	int n;
-
-    /* in case of binary data, send response body to client via copying? 
-     * presumably mmap can't be used because it can't iteratively read 
-     * from a server the way read would. */
-    srcp = (char *)Malloc(filesize);
-    n = Rio_readn(server_connfd, srcp, filesize);   /* read from file into the allocated srcp "buffer" memory block */
-    printf("Read data of size %d\n", (int)n);
-    Rio_writen(client_connfd, srcp, filesize);     /* write from srcp into client */
-
-    free(srcp);
-
-    return;
-}
-/* $end send_binary */ 
-
-
-
-
-
-
-
-/*
- * send_r_and_h - sends request + conventional headers to server, then
- * forwards client-side requests, in two blocks.
- * Maintains client preference for the "Host" value. 
- * Does not preserve the ordering of the headers sent.
- *
- * RFC2616: the order in which header fields with differing field names are
- * received is not significant. Good practice: send general headers, then 
- * request/response headers, then entity headers.
- * However, the order of headers matters when there are multiple headers
- * with the same name.
- */
-/* $begin send_r_and_h */
-void send_r_and_h(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client) 
-{
-	char buf[MAXLINE], buf_client[MAXLINE], proxy_toserver[MAXLINE], client_toserver[MAXLINE], 
-				overriden_host[MAXLINE], overriden_agent[MAXLINE];
-
-	strcpy(client_toserver, "");
-
-    /* send method request built by proxy, to server */
-	sprintf(buf, "%s\r\n", request_toserver); printf("%s", buf);
-    Rio_writen(server_connfd, buf, strlen(buf));
-
-    /* obtain Host and User-Agent info from client; ignore Connection and 
-     * Proxy-Connection from client and write "close". build+send all headers
-     */
+    /* override client headers with proxy preference; overtake the rest */
     do
     {
         Rio_readlineb(rio_client, buf_client, MAXLINE);
     	if (strstr(buf_client, "Host:")) {
-    		sscanf(buf_client, "Host: %s", overriden_host);
-    		strcpy(targethost, overriden_host);
-    	} else if (strstr(buf_client, "User-Agent:")) { /* disabled */
-    		// sscanf(buf_client, "User-Agent: %s", overriden_agent);
-    		// strcpy(user_agent_hdr_alt, overriden_agent);
-    	} else if (strstr(buf_client, "Connection:") || strstr(buf_client, "Proxy-")) {
+    		sscanf(buf_client, "Host: %s", targethost);
+    	} else if (strstr(buf_client, "Connection:") || strstr(buf_client, "Proxy-") || 
+    		strstr(buf_client, "Accept:") || strstr(buf_client, "Accept-En")) {
     		continue;
-    	} else {
-    		/* build the content to be sent to server from client unaltered */
+    	} else { /* build the content to be sent to server from client unaltered */
     		sprintf(client_toserver, "%s%s", client_toserver, buf_client);
     	}
 
@@ -406,55 +244,77 @@ void send_r_and_h(int server_connfd, char *request_toserver, char *targethost, r
 
     } while (strcmp(buf_client, "\r\n")); 
     
-    strcat(client_toserver, "\r\n");
-
-    /* override mandatory proxy headers where necessary */
+    /* build proxy headers */
     sprintf(proxy_toserver, "Host: %s\r\n", targethost);
     sprintf(proxy_toserver, "%sUser-Agent: %s\r\n", proxy_toserver, user_agent_hdr_alt); 
+    sprintf(proxy_toserver, "%sAccept: %s\r\n", proxy_toserver, accept_header); 
+    sprintf(proxy_toserver, "%sAccept-Encoding: %s\r\n", proxy_toserver, accept_encoding_header); 
     sprintf(proxy_toserver, "%sConnection: close\r\n", proxy_toserver); 
-    sprintf(proxy_toserver, "%sProxy-Connection: close\r\n", proxy_toserver); 
+    sprintf(proxy_toserver, "%sProxy-Connection: close\r\n\r\n", proxy_toserver); /* terminate with \r\n\r\n */
     
-    printf("Request headers built by proxy, to server: \n");
-    printf("%s", proxy_toserver);
-    printf("Request headers forwarded from client, to server: \n");
-    printf("%s", client_toserver);
-    printf("End of request headers from client, to server: \n");
+    /* for debugging */
+    printf("Request headers built by proxy, to server:\n%s", proxy_toserver);
+    printf("Request headers forwarded from client, to server:\n%sEnd of headers.\n\n", client_toserver);
 
-
-    /* send mandatory headers by proxy, forward the rest from client. */   
+    /* send mandatory headers by proxy, then forward the rest from client. */   
+    Rio_writen(server_connfd, request_toserver, strlen(request_toserver)); /* request */
     Rio_writen(server_connfd, proxy_toserver, strlen(proxy_toserver));
-    Rio_writen(server_connfd, client_toserver, strlen(client_toserver)); /* terminate with \r\n\r\n */ 
+    Rio_writen(server_connfd, client_toserver, strlen(client_toserver));
 
     return;
 }
-/* $end send_r_and_h */
+/* $end send_request */
 
 /*
- * clienterror - returns an error message to the CLIENT
+ * forward_response - forward server's response to client
  */
-/* $begin clienterror */
-void clienterror(int fd, char *cause, char *errnum, 
-		 char *shortmsg, char *longmsg) 
+/* $begin forward_response */
+void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd)
 {
-    char buf[MAXLINE];
+	int rio_cnt;
+	char server_buf[MAXLINE];
 
-    /* Print the HTTP response headers */
-    sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "Content-type: text/html\r\n\r\n");
-    Rio_writen(fd, buf, strlen(buf));
+    /* set up rio buffer to read server responses */
+    Rio_readinitb(rio_server, server_connfd); 
+	debug_status(rio_server, client_connfd); 
 
-    /* Print the HTTP response body */
-    sprintf(buf, "<html><title>Proxy Error</title>");
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "<body bgcolor=""ffffff"">\r\n");
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "%s: %s\r\n", errnum, shortmsg);
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "<p>%s: %s\r\n", longmsg, cause);
-    Rio_writen(fd, buf, strlen(buf));
-    sprintf(buf, "<hr><em>The Web Proxy</em>\r\n");
-    Rio_writen(fd, buf, strlen(buf));
+	/* write server response to client */
+    while ( (rio_cnt = Rio_readnb(rio_server, server_buf, MAXLINE)) != 0 ) {
+    	Rio_writen(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
+
+    	/* determine end of headers, extract content type/length, service non-GET requests */
+    	// if (!(strcmp(server_buf, "\r\n")) ) {}        	}
+    }
+
+    return;
 }
-/* $end clienterror */
+/* $end forward_response */
+
+
+/* debugging helpers */
+
+void debug_status(rio_t *rp, int client_connfd)
+{
+	char server_buf[MAXLINE];
+	int rio_cnt;
+
+    if ( (rio_cnt = Rio_readnb(rp, server_buf, MAXLINE)) != 0 ) { /* status code from server */
+        printf("Server response status (first response header): \n");
+        printf("%s\r\n",server_buf);
+        Rio_writen(client_connfd, server_buf, rio_cnt);
+	}
+
+}
+
+void identify_client(const struct sockaddr *sa, socklen_t clientlen) 
+{
+	char hostname[MAXLINE], port[8];
+
+    Getnameinfo(sa, clientlen, hostname, MAXLINE, 
+            port, MAXLINE, 0);
+    printf("PROXY: Accepted connection from client (%s, %s)\n", hostname, port);
+
+    return;
+}
+
 
