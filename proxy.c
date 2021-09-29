@@ -61,9 +61,15 @@
  * http://http://www.apimages.com/
  *
  */
+/* Testing methods
+ * curl -v --proxy http://localhost:proxyport/ http://localhost:servport/
+ *
+ *
+ */
 
 #include <stdio.h>
 #include "csapp.h"
+#include "io_wrappers.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -93,9 +99,8 @@ int main(int argc, char **argv)
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
     rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
-    char targethost[MAXLINE], path[MAXLINE], 
-    			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
-    			request_method[64];
+    char targethost[MAXLINE], path[MAXLINE], request_toserver[MAXLINE], 
+    	server_buf[MAXLINE], server_port[8], request_method[64];
 
 	/* Check command line args */
     if (argc != 2) {
@@ -109,33 +114,33 @@ int main(int argc, char **argv)
     /* sequential proxy: waits for contact by client, services a request, closes connection */
     listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid */
     while (1) {
-    	/* accept incoming connections */
-    	clientlen = sizeof(clientaddr);
-    	if ((client_connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
-    		printf("Couldn't connect to client.\n"); 
-    		continue;
-    	}
+		/* accept incoming connections */
+		clientlen = sizeof(clientaddr);
+		if ((client_connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
+			printf("Couldn't connect to client.\n"); 
+			continue;
+		}
 
-    	/* debugging, obtain client info; not necessary for basic proxy tasks */
-    	identify_client((SA *) &clientaddr, clientlen);
+		/* debugging, obtain client info; not necessary for basic proxy tasks */
+		identify_client((SA *) &clientaddr, clientlen);
 
-        /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
-    	if  (readparse_request(client_connfd, targethost, path, 
-        			server_port, request_method, request_toserver, &rio_client) < 0) 
-    		continue; /* move on to next request if unsuccessful */
+		/* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
+		if  (readparse_request(client_connfd, targethost, path, 
+			server_port, request_method, request_toserver, &rio_client) < 0) 
+			continue; /* move on to next request if unsuccessful */
 
-        /* proxy performs a client role: connect to the server */
+		/* proxy performs a client role: connect to the server */
 		if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
 			continue; /* move on to next request if unsuccessful */
 
-	    /* send request, check and modify mandatory headers then send all headers to server */  
-	    send_request(server_connfd, request_toserver, targethost, &rio_client);
+		/* send request, check and modify mandatory headers then send all headers to server */  
+		send_request(server_connfd, request_toserver, targethost, &rio_client);
 
-	    /* set up server-facing I/O buffer; write server response to client */
-	    forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
+		/* set up server-facing I/O buffer; write server response to client */
+		forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
 
-        Close(server_connfd);
-    	Close(client_connfd);
+		Close(server_connfd);
+		Close(client_connfd);
     }
 
     Close(listenfd);
@@ -160,8 +165,9 @@ int readparse_request(int fd, char *targethost, char *path, char *port, char *re
 
     /* Read request line and headers */
     Rio_readinitb(rp, fd);
-    if (!Rio_readlineb(rp, buf, MAXLINE))  
+    if (!Rio_readlineb_w(rp, buf, MAXLINE))  /* can't parse ampersand from cmdline; need \& */
         return 0; /* nothing to read */
+    printf("Buffer prior to sscanf:\n%s", buf);    
 
     sscanf(buf, "%s %s %s", method, uri, version);  
     printf("PROXY: Request of method [%s] received from client:\n%s", method, buf);    
@@ -230,7 +236,7 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
     /* override client headers with proxy preference; overtake the rest */
     do
     {
-        Rio_readlineb(rio_client, buf_client, MAXLINE);
+        Rio_readlineb_w(rio_client, buf_client, MAXLINE);
     	if (strstr(buf_client, "Host:")) {
     		sscanf(buf_client, "Host: %s", targethost);
     	} else if (strstr(buf_client, "Connection:") || strstr(buf_client, "Proxy-") || 
@@ -257,9 +263,9 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
     printf("Request headers forwarded from client, to server:\n%sEnd of headers.\n\n", client_toserver);
 
     /* send mandatory headers by proxy, then forward the rest from client. */   
-    Rio_writen(server_connfd, request_toserver, strlen(request_toserver)); /* request */
-    Rio_writen(server_connfd, proxy_toserver, strlen(proxy_toserver));
-    Rio_writen(server_connfd, client_toserver, strlen(client_toserver));
+    Rio_writen_w(server_connfd, request_toserver, strlen(request_toserver)); /* request */
+    Rio_writen_w(server_connfd, proxy_toserver, strlen(proxy_toserver));
+    Rio_writen_w(server_connfd, client_toserver, strlen(client_toserver));
 
     return;
 }
@@ -279,8 +285,8 @@ void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, i
 	debug_status(rio_server, client_connfd); 
 
 	/* write server response to client */
-    while ( (rio_cnt = Rio_readnb(rio_server, server_buf, MAXLINE)) != 0 ) {
-    	Rio_writen(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
+    while ( (rio_cnt = Rio_readnb_w(rio_server, server_buf, MAXLINE)) != 0 ) {
+    	Rio_writen_w(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
 
     	/* determine end of headers, extract content type/length, service non-GET requests */
     	// if (!(strcmp(server_buf, "\r\n")) ) {}        	}
@@ -298,10 +304,10 @@ void debug_status(rio_t *rp, int client_connfd)
 	char server_buf[MAXLINE];
 	int rio_cnt;
 
-    if ( (rio_cnt = Rio_readnb(rp, server_buf, MAXLINE)) != 0 ) { /* status code from server */
-        printf("Server response status (first response header): \n");
+    if ( (rio_cnt = Rio_readnb_w(rp, server_buf, MAXLINE)) != 0 ) { /* status code from server */
+        printf("Server response status (first response header) has read %d bytes: \n", rio_cnt);
         printf("%s\r\n",server_buf);
-        Rio_writen(client_connfd, server_buf, rio_cnt);
+        Rio_writen_w(client_connfd, server_buf, rio_cnt);
 	}
 
 }
