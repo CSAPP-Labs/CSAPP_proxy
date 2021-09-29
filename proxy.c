@@ -36,13 +36,12 @@
  * server fd and moves on to the next iteration, sequentially
  * servicing another client. 
  *
- * Issue: need to detect entity-body; need to distinguish text
- * from binary data; need to copy such data (like images/videos)
- * from the server to the client.
  *
  * Implementing POST and HEAD is optional.
  *
- * Part II
+ * Part II: process-based concurrency (implemented)
+ *
+ * Part II: thread-based concurrency 
  * 
  * Part III
  * For testing, browser caching should be disabled. For firefox, 
@@ -82,17 +81,22 @@ void parse_url(char *url, char *host, char *abs_path, char *port);
 void send_request(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client);
 void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd);
 
+/* informational */
 void debug_status(rio_t *rp, int client_connfd);
 void identify_client(const struct sockaddr *sa, socklen_t clientlen);
+
+/* process concurrency */
+void sigchld_handler(int sig);
 
 
 /* $begin main */
 int main(int argc, char **argv)
 {
+	pid_t pid;
     int listenfd, client_connfd, server_connfd, rio_cnt, content_length;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
-    rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
+    rio_t rio_client, rio_server; 
     char targethost[MAXLINE], path[MAXLINE], 
     			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
     			request_method[64];
@@ -106,9 +110,13 @@ int main(int argc, char **argv)
 	/* ignore SIGPIPE signals */
 	Signal(SIGPIPE, SIG_IGN);
 
-    /* sequential proxy: waits for contact by client, services a request, closes connection */
+	/* reap child processes doing work for clients */
+	Signal(SIGCHLD, sigchld_handler);	
+
+    /* concurrent process-based proxy: spawns a child process for each valid client connection */
     listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid */
     while (1) {
+
     	/* accept incoming connections */
     	clientlen = sizeof(clientaddr);
     	if ((client_connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
@@ -116,26 +124,31 @@ int main(int argc, char **argv)
     		continue;
     	}
 
-    	/* debugging, obtain client info; not necessary for basic proxy tasks */
-    	identify_client((SA *) &clientaddr, clientlen);
+    	if ( (pid = Fork()) == 0) {
+	    	/* debugging, obtain client info; not necessary for basic proxy tasks */
+	    	identify_client((SA *) &clientaddr, clientlen);
 
-        /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
-    	if  (readparse_request(client_connfd, targethost, path, 
-        			server_port, request_method, request_toserver, &rio_client) < 0) 
-    		continue; /* move on to next request if unsuccessful */
+	        /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
+	    	if  (readparse_request(client_connfd, targethost, path, 
+	        			server_port, request_method, request_toserver, &rio_client) < 0) 
+	    		continue; /* move on to next request if unsuccessful */
 
-        /* proxy performs a client role: connect to the server */
-		if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
-			continue; /* move on to next request if unsuccessful */
+	        /* proxy performs a client role: connect to the server */
+			if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
+				continue; /* move on to next request if unsuccessful */
 
-	    /* send request, check and modify mandatory headers then send all headers to server */  
-	    send_request(server_connfd, request_toserver, targethost, &rio_client);
+		    /* send request, check and modify mandatory headers then send all headers to server */  
+		    send_request(server_connfd, request_toserver, targethost, &rio_client);
 
-	    /* set up server-facing I/O buffer; write server response to client */
-	    forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
+		    /* set up server-facing I/O buffer; write server response to client */
+		    forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
 
-        Close(server_connfd);
-    	Close(client_connfd);
+	        Close(server_connfd);
+	    	Close(client_connfd);
+	    }
+	    // if (pid != 0) {printf("Process of pid [%d] spawned.\n", pid);} /* for examination of pid */
+	    // Close(client_connfd); /* causes non-terminating "close of bad descriptor" error */
+
     }
 
     Close(listenfd);
@@ -276,7 +289,7 @@ void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, i
 
     /* set up rio buffer to read server responses */
     Rio_readinitb(rio_server, server_connfd); 
-	debug_status(rio_server, client_connfd); 
+	// debug_status(rio_server, client_connfd); /* prints out server response headers and the binary data too */
 
 	/* write server response to client */
     while ( (rio_cnt = Rio_readnb(rio_server, server_buf, MAXLINE)) != 0 ) {
@@ -318,3 +331,21 @@ void identify_client(const struct sockaddr *sa, socklen_t clientlen)
 }
 
 
+/* process-based concurrency helpers */
+
+/*
+ * sigchild handler: reap client-servicing children inside a sigchild 
+ * handler instead of explicitly waiting for them to terminate
+ */
+/* $begin handler */
+void sigchld_handler(int sig)
+{
+    pid_t pid;
+    int olderrno = errno;
+
+    while ((pid = waitpid(-1, NULL, WNOHANG))>0)
+        ;
+
+    errno = olderrno;
+}
+/* $end handler */
