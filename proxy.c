@@ -42,7 +42,9 @@
  *
  * Implementing POST and HEAD is optional.
  *
- * Part II
+ * Part II: basic thread-based concurrency (implemented)
+ *
+ * Part II: prethreaded concurrency (not implemented)
  * 
  * Part III
  * For testing, browser caching should be disabled. For firefox, 
@@ -82,20 +84,22 @@ void parse_url(char *url, char *host, char *abs_path, char *port);
 void send_request(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client);
 void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd);
 
+/* debugging */
 void debug_status(rio_t *rp, int client_connfd);
 void identify_client(const struct sockaddr *sa, socklen_t clientlen);
+
+/* thread-based concurrency functionality */
+void *thread(void *vargp);
 
 
 /* $begin main */
 int main(int argc, char **argv)
 {
-    int listenfd, client_connfd, server_connfd, rio_cnt, content_length;
+    int listenfd;
+    int *client_connfdp;
+    pthread_t tid;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
-    rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
-    char targethost[MAXLINE], path[MAXLINE], 
-    			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
-    			request_method[64];
 
 	/* Check command line args */
     if (argc != 2) {
@@ -106,39 +110,27 @@ int main(int argc, char **argv)
 	/* ignore SIGPIPE signals */
 	Signal(SIGPIPE, SIG_IGN);
 
-    /* sequential proxy: waits for contact by client, services a request, closes connection */
+    /* concurrent thread-based proxy: waits for contact by client request, spawn a thread, move on to next */
     listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid */
     while (1) {
+
     	/* accept incoming connections */
     	clientlen = sizeof(clientaddr);
-    	if ((client_connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
+    	client_connfdp = Malloc((sizeof(int))); /* new block storing id of each request to avoid race in threads */
+    	if ((*client_connfdp = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
     		printf("Couldn't connect to client.\n"); 
     		continue;
     	}
 
-    	/* debugging, obtain client info; not necessary for basic proxy tasks */
-    	identify_client((SA *) &clientaddr, clientlen);
+		/* NEED TO make thread-safe: debugging, obtain client info; not necessary for basic proxy tasks */
+		/* calling here may not be followed by the printout of the client request identified due to concurrency */
+		identify_client((SA *) &clientaddr, clientlen);
 
-        /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
-    	if  (readparse_request(client_connfd, targethost, path, 
-        			server_port, request_method, request_toserver, &rio_client) < 0) 
-    		continue; /* move on to next request if unsuccessful */
+    	Pthread_create(&tid, NULL, thread, client_connfdp);
 
-        /* proxy performs a client role: connect to the server */
-		if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
-			continue; /* move on to next request if unsuccessful */
-
-	    /* send request, check and modify mandatory headers then send all headers to server */  
-	    send_request(server_connfd, request_toserver, targethost, &rio_client);
-
-	    /* set up server-facing I/O buffer; write server response to client */
-	    forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
-
-        Close(server_connfd);
-    	Close(client_connfd);
     }
 
-    Close(listenfd);
+    Close(listenfd); /* only if break out of infinite loop */
 
 	return 0;
 }
@@ -318,3 +310,40 @@ void identify_client(const struct sockaddr *sa, socklen_t clientlen)
 }
 
 
+/* thread-based concurrency functionality */
+
+void *thread(void *vargp)
+{
+	int client_connfd = *((int *)vargp);
+
+    /* all buffers need to be local to a thread */
+    int server_connfd, rio_cnt, content_length;
+    rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
+    char targethost[MAXLINE], path[MAXLINE], 
+    			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
+    			request_method[64];
+
+	Pthread_detach(pthread_self()); /* free memory by kernel once thread terminates */
+	Free(vargp);
+
+	/* service the client */
+	/* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
+	if  (readparse_request(client_connfd, targethost, path, 
+				server_port, request_method, request_toserver, &rio_client) < 0) 
+		return NULL; /* move on to next request if unsuccessful */
+
+	/* proxy performs a client role: connect to the server */
+	if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
+		return NULL; /* move on to next request if unsuccessful */
+
+	/* send request, check and modify mandatory headers then send all headers to server */  
+	send_request(server_connfd, request_toserver, targethost, &rio_client);
+
+	/* set up server-facing I/O buffer; write server response to client */
+	forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
+
+
+	Close(server_connfd);
+	Close(client_connfd);
+	return NULL;
+}
