@@ -13,13 +13,17 @@
  * For full testing via browser, the browser preferences would need
  * to be set to accessing the internet via localhost <selected port>
  * for http style communications; https would access the internet
- * normally. 
+ * normally. The selected port is 3000.
  *
  * The proxy's general structure is that of a server. It sets up 
  * the string buffers, socket address structures, and I/O buffers
  * to prepare for communication. It opens and sets up a listening 
- * file descriptor and begins iterating for incoming client 
- * connections. The accept() functionality blocks via syscall 
+ * file descriptor and begins iterating for incoming connection 
+ * requests. Thus, each iteration services a request from some 
+ * client, and requests from separate clients could be interleaved
+ * for the duration of the proxy's operation. Attempts by multiple
+ * clients to access an Internet resource are not queued by the 
+ * proxy. The accept() functionality pauses the proxy via syscall 
  * until a valid client tries to connect with the proxy, at which
  * point a connected file descriptor is returned for I/O. Once 
  * this is done, the proxy reads incoming lines from the client
@@ -34,12 +38,15 @@
  * reading its responses and writing them to the socket fd of the
  * client. Finally, the proxy closes both the client and the 
  * server fd and moves on to the next iteration, sequentially
- * servicing another client. 
+ * servicing another connection request. 
  *
  *
  * Implementing POST and HEAD is optional.
  *
  * Part II: process-based concurrency (implemented)
+ * A new process is spawned for each connection request accepted
+ * by the proxy. This may result in a large number of child 
+ * processes if there are many incoming connection requests.
  *
  * Part II: thread-based concurrency 
  * 
@@ -110,7 +117,7 @@ int main(int argc, char **argv)
 	/* ignore SIGPIPE signals */
 	Signal(SIGPIPE, SIG_IGN);
 
-	/* reap child processes doing work for clients */
+	/* reap finished child processes doing work for clients without waiting */
 	Signal(SIGCHLD, sigchld_handler);	
 
     /* concurrent process-based proxy: spawns a child process for each valid client connection */
@@ -124,6 +131,7 @@ int main(int argc, char **argv)
     		continue;
     	}
 
+    	/* spawn a child process for each valid connection request; terminate when done */
     	if ( (pid = Fork()) == 0) {
 	    	/* debugging, obtain client info; not necessary for basic proxy tasks */
 	    	identify_client((SA *) &clientaddr, clientlen);
@@ -133,7 +141,7 @@ int main(int argc, char **argv)
 	        			server_port, request_method, request_toserver, &rio_client) < 0) 
 	    		continue; /* move on to next request if unsuccessful */
 
-	        /* proxy performs a client role: connect to the server */
+	        /* proxy performs a client role: connect to the server (targethost) */
 			if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
 				continue; /* move on to next request if unsuccessful */
 
@@ -145,9 +153,10 @@ int main(int argc, char **argv)
 
 	        Close(server_connfd);
 	    	Close(client_connfd);
+	    	exit(0);
 	    }
 	    // if (pid != 0) {printf("Process of pid [%d] spawned.\n", pid);} /* for examination of pid */
-	    // Close(client_connfd); /* causes non-terminating "close of bad descriptor" error */
+	    Close(client_connfd); /* causes non-terminating "close of bad descriptor" error */
 
     }
 
