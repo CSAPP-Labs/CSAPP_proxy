@@ -345,11 +345,11 @@ void *thread(void *vargp)
         /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
         if  (readparse_request(client_connfd, targethost, path, 
         			server_port, request_method, request_toserver, &rio_client) < 0) 
-        	return NULL; /* move on to next request if unsuccessful */
+        	continue; /* move on to next request if unsuccessful */
 
         /* proxy performs a client role: connect to the server */
         if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
-        	return NULL; /* move on to next request if unsuccessful */
+        	continue; /* move on to next request if unsuccessful */
 
         /* send request, check and modify mandatory headers then send all headers to server */  
         send_request(server_connfd, request_toserver, targethost, &rio_client);
