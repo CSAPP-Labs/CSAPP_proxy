@@ -42,9 +42,9 @@
  *
  * Implementing POST and HEAD is optional.
  *
- * Part II: basic thread-based concurrency (implemented)
+ * Part II: basic thread-based concurrency (not implemented here)
  *
- * Part II: prethreaded concurrency (not implemented)
+ * Part II: prethreaded concurrency (implemented)
  * 
  * Part III
  * For testing, browser caching should be disabled. For firefox, 
@@ -61,6 +61,8 @@
  * http://www.testingmcafeesites.com/
  *
  * http://http://www.apimages.com/
+ *
+ * http://periodicvideos.com/
  *
  */
 
@@ -344,12 +346,16 @@ void *thread(void *vargp)
         /* service the client */
         /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
         if  (readparse_request(client_connfd, targethost, path, 
-        			server_port, request_method, request_toserver, &rio_client) < 0) 
+        			server_port, request_method, request_toserver, &rio_client) < 0) {
+            Close(client_connfd);
         	continue; /* move on to next request if unsuccessful */
+        }
 
         /* proxy performs a client role: connect to the server */
-        if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
+        if ((server_connfd = Open_clientfd(targethost, server_port)) < 0) {
+            Close(client_connfd);
         	continue; /* move on to next request if unsuccessful */
+        }
 
         /* send request, check and modify mandatory headers then send all headers to server */  
         send_request(server_connfd, request_toserver, targethost, &rio_client);
