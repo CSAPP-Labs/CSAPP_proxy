@@ -67,11 +67,13 @@
 #include <stdio.h>
 #include "csapp.h"
 #include "io_wrappers.h"
+#include "sbuf.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
-
+#define SBUFSIZE 16
+#define NTHREADS 4
 /* You won't lose style points for including this long line in your code */
 // static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 static const char *user_agent_hdr_alt = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:84.0) Gecko/20100101 Firefox/84.0";
@@ -92,15 +94,19 @@ void identify_client(const struct sockaddr *sa, socklen_t clientlen);
 /* thread-based concurrency functionality */
 void *thread(void *vargp);
 
+/* declare global shared buffer for prethreading */
+sbuf_t sbuf; 
+
 
 /* $begin main */
 int main(int argc, char **argv)
 {
     int listenfd;
-    int *client_connfdp;
+    int client_connfd; /* inserted into sbuf by loop that accepts connections */
     pthread_t tid;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
+    int thread_i;
 
 	/* Check command line args */
     if (argc != 2) {
@@ -111,14 +117,18 @@ int main(int argc, char **argv)
 	/* ignore SIGPIPE signals */
 	Signal(SIGPIPE, SIG_IGN);
 
-    /* concurrent thread-based proxy: waits for contact by client request, spawn a thread, move on to next */
-    listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid */
+    /* prethreading: create worker threads */
+    sbuf_init(&sbuf, SBUFSIZE);
+    for (int thread_i = 0; thread_i < NTHREADS; thread_i++)
+        Pthread_create(&tid, NULL, thread, NULL);
+
+    /* concurrent prethreaded proxy: insert client descriptors into buffer accessed by worker threads */
+    listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid; can reposition before prethreading */
     while (1) {
 
     	/* accept incoming connections */
     	clientlen = sizeof(clientaddr);
-    	client_connfdp = Malloc((sizeof(int))); /* new block storing id of each request to avoid race in threads */
-    	if ((*client_connfdp = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
+    	if ((client_connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen)) < 0) {
     		printf("Couldn't connect to client.\n"); 
     		continue;
     	}
@@ -127,7 +137,8 @@ int main(int argc, char **argv)
 		/* calling here may not be followed by the printout of the client request identified due to concurrency */
 		identify_client((SA *) &clientaddr, clientlen);
 
-    	Pthread_create(&tid, NULL, thread, client_connfdp);
+        /* place into buffer */
+        sbuf_insert(&sbuf, client_connfd);
 
     }
 
@@ -271,9 +282,9 @@ void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, i
     Rio_readinitb(rio_server, server_connfd); 
 	debug_status(rio_server, client_connfd); 
 
-	/* write server response to client */
-    while ( (rio_cnt = Rio_readnb_w(rio_server, server_buf, MAXLINE)) != 0 ) {
-    	Rio_writen_w(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
+	/* write server response to client; debug_status may perform this work */
+    while ( (rio_cnt = Rio_readnb_w(rio_server, server_buf, MAXLINE)) != 0 ) { /* readnb reads raw binary */
+    	Rio_writen_w(client_connfd, server_buf, rio_cnt); /* write binary to client from server buffer */
 
     	/* determine end of headers, extract content type/length, service non-GET requests */
     	// if (!(strcmp(server_buf, "\r\n")) ) {}        	}
@@ -315,36 +326,40 @@ void identify_client(const struct sockaddr *sa, socklen_t clientlen)
 
 void *thread(void *vargp)
 {
-	int client_connfd = *((int *)vargp);
 
     /* all buffers need to be local to a thread */
-    int server_connfd, rio_cnt, content_length;
+    int server_connfd, client_connfd, rio_cnt, content_length;
     rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
     char targethost[MAXLINE], path[MAXLINE], 
     			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
     			request_method[64];
 
-	Pthread_detach(pthread_self()); /* free memory by kernel once thread terminates */
-	Free(vargp);
+	Pthread_detach(pthread_self()); /* free memory when proxy terminates (worker thread persists with proxy) */
 
-	/* service the client */
-	/* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
-	if  (readparse_request(client_connfd, targethost, path, 
-				server_port, request_method, request_toserver, &rio_client) < 0) 
-		return NULL; /* move on to next request if unsuccessful */
+    /* worker thread persisting */
+    while (1) {
 
-	/* proxy performs a client role: connect to the server */
-	if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
-		return NULL; /* move on to next request if unsuccessful */
+        client_connfd = sbuf_remove(&sbuf); /* obtain queued client descriptor from buffer, not from master listener */
 
-	/* send request, check and modify mandatory headers then send all headers to server */  
-	send_request(server_connfd, request_toserver, targethost, &rio_client);
+        /* service the client */
+        /* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
+        if  (readparse_request(client_connfd, targethost, path, 
+        			server_port, request_method, request_toserver, &rio_client) < 0) 
+        	return NULL; /* move on to next request if unsuccessful */
 
-	/* set up server-facing I/O buffer; write server response to client */
-	forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
+        /* proxy performs a client role: connect to the server */
+        if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
+        	return NULL; /* move on to next request if unsuccessful */
 
+        /* send request, check and modify mandatory headers then send all headers to server */  
+        send_request(server_connfd, request_toserver, targethost, &rio_client);
 
-	Close(server_connfd);
-	Close(client_connfd);
+        /* set up server-facing I/O buffer; write server response to client */
+        forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
+
+        Close(server_connfd);
+        Close(client_connfd);
+    }
+
 	return NULL;
 }
