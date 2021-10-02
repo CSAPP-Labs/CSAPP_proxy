@@ -36,11 +36,8 @@
  * server fd and moves on to the next iteration, sequentially
  * servicing another client. 
  *
- * Issue: need to detect entity-body; need to distinguish text
- * from binary data; need to copy such data (like images/videos)
- * from the server to the client.
- *
- * Implementing POST and HEAD is optional.
+ * Implementing POST and HEAD is optional (need to detect entity
+ * body for it)
  *
  * Part II
  * 
@@ -64,6 +61,7 @@
 
 #include <stdio.h>
 #include "csapp.h"
+#include "io_wrappers.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -160,7 +158,7 @@ int readparse_request(int fd, char *targethost, char *path, char *port, char *re
 
     /* Read request line and headers */
     Rio_readinitb(rp, fd);
-    if (!Rio_readlineb(rp, buf, MAXLINE))  
+    if (!Rio_readlineb_w(rp, buf, MAXLINE))  
         return 0; /* nothing to read */
 
     sscanf(buf, "%s %s %s", method, uri, version);  
@@ -230,7 +228,7 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
     /* override client headers with proxy preference; overtake the rest */
     do
     {
-        Rio_readlineb(rio_client, buf_client, MAXLINE);
+        Rio_readlineb_w(rio_client, buf_client, MAXLINE);
     	if (strstr(buf_client, "Host:")) {
     		sscanf(buf_client, "Host: %s", targethost);
     	} else if (strstr(buf_client, "Connection:") || strstr(buf_client, "Proxy-") || 
@@ -257,9 +255,9 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
     printf("Request headers forwarded from client, to server:\n%sEnd of headers.\n\n", client_toserver);
 
     /* send mandatory headers by proxy, then forward the rest from client. */   
-    Rio_writen(server_connfd, request_toserver, strlen(request_toserver)); /* request */
-    Rio_writen(server_connfd, proxy_toserver, strlen(proxy_toserver));
-    Rio_writen(server_connfd, client_toserver, strlen(client_toserver));
+    Rio_writen_w(server_connfd, request_toserver, strlen(request_toserver)); /* request */
+    Rio_writen_w(server_connfd, proxy_toserver, strlen(proxy_toserver));
+    Rio_writen_w(server_connfd, client_toserver, strlen(client_toserver));
 
     return;
 }
@@ -279,8 +277,8 @@ void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, i
 	debug_status(rio_server, client_connfd); 
 
 	/* write server response to client */
-    while ( (rio_cnt = Rio_readnb(rio_server, server_buf, MAXLINE)) != 0 ) {
-    	Rio_writen(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
+    while ( (rio_cnt = Rio_readnb_w(rio_server, server_buf, MAXLINE)) != 0 ) {
+    	Rio_writen_w(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
 
     	/* determine end of headers, extract content type/length, service non-GET requests */
     	// if (!(strcmp(server_buf, "\r\n")) ) {}        	}
@@ -298,10 +296,10 @@ void debug_status(rio_t *rp, int client_connfd)
 	char server_buf[MAXLINE];
 	int rio_cnt;
 
-    if ( (rio_cnt = Rio_readnb(rp, server_buf, MAXLINE)) != 0 ) { /* status code from server */
+    if ( (rio_cnt = Rio_readnb_w(rp, server_buf, MAXLINE)) != 0 ) { /* status code from server */
         printf("Server response status (first response header): \n");
         printf("%s\r\n",server_buf);
-        Rio_writen(client_connfd, server_buf, rio_cnt);
+        Rio_writen_w(client_connfd, server_buf, rio_cnt);
 	}
 
 }
