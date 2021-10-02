@@ -782,10 +782,7 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
 	if ((nwritten = write(fd, bufp, nleft)) <= 0) {
 	    if (errno == EINTR)  /* Interrupted by sig handler return */
 		  nwritten = 0;    /* and call write() again */
-        else if (errno == EPIPE) { /* EDIT: announce EPIPE error at the proxy */
-            // printf("EPIPE error.\n");
-            return -1;
-        } else
+        else
 		  return -1;       /* errno set by write() */
 	}
 	nleft -= nwritten;
@@ -813,9 +810,6 @@ static ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n)
 	rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, 
 			   sizeof(rp->rio_buf));
 	if (rp->rio_cnt < 0) {
-        if (errno == ECONNRESET) { /* EDIT: treat prematurely closed socket as EOF */
-            return 0;
-        }
 	    if (errno != EINTR) /* Interrupted by sig handler return */
 		return -1;
 	}
