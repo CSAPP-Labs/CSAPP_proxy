@@ -67,6 +67,7 @@
 #include <stdio.h>
 #include "csapp.h"
 #include "io_wrappers.h"
+// #include "cache.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -237,7 +238,7 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
 
     } while (strcmp(buf_client, "\r\n")); 
     
-    /* build proxy headers */
+    /* build proxy headers; specify that connections shouldn't persist */
     sprintf(proxy_toserver, "Host: %s\r\n", targethost);
     sprintf(proxy_toserver, "%sUser-Agent: %s\r\n", proxy_toserver, user_agent_hdr_alt); 
     sprintf(proxy_toserver, "%sAccept: %s\r\n", proxy_toserver, accept_header); 

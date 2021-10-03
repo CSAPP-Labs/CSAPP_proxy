@@ -14,7 +14,10 @@ csapp.o: csapp.c csapp.h
 	$(CC) $(CFLAGS) -c csapp.c
 	
 io_wrappers.o: io_wrappers.c io_wrappers.h
-	$(CC) $(CFLAGS) -c io_wrappers.c	
+	$(CC) $(CFLAGS) -c io_wrappers.c
+	
+# cache.o: cache.c cache.h
+# 	$(CC) $(CFLAGS) -c cache.c	
 
 proxy.o: proxy.c csapp.h io_wrappers.h
 	$(CC) $(CFLAGS) -c proxy.c
