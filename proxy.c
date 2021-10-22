@@ -46,7 +46,7 @@
  *
  * Part II: prethreaded concurrency (not implemented)
  * 
- * Part III
+ * Part III (implemented)
  * For testing, browser caching should be disabled. For firefox, 
  * type "about:config" in a new tab, search for 
  * network.http.use-cache and toggle from true to false.
@@ -67,7 +67,7 @@
 #include <stdio.h>
 #include "csapp.h"
 #include "io_wrappers.h"
-// #include "cache.h"
+#include "cache.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -81,10 +81,10 @@ static const char *accept_encoding_header = "gzip, deflate";
 
 /* HTTP functionality */
 int readparse_request(int fd, char *targethost, char *path, char *port, char *method, 
-	char *request_toserver, rio_t *rp);
+	char *request_toserver, rio_t *rp, char *url_ptr);
 void parse_url(char *url, char *host, char *abs_path, char *port);
 void send_request(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client);
-void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd);
+void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd, char *url_ptr);
 
 /* debugging */
 void debug_status(rio_t *rp, int client_connfd);
@@ -112,6 +112,9 @@ int main(int argc, char **argv)
 	/* ignore SIGPIPE signals */
 	Signal(SIGPIPE, SIG_IGN);
 
+	/* */
+	initialize_cache();
+
     /* concurrent thread-based proxy: waits for contact by client request, spawn a thread, move on to next */
     listenfd = Open_listenfd(argv[1]); /* exit if cmdline port invalid */
     while (1) {
@@ -124,8 +127,7 @@ int main(int argc, char **argv)
     		continue;
     	}
 
-		/* NEED TO make thread-safe: debugging, obtain client info; not necessary for basic proxy tasks */
-		/* calling here may not be followed by the printout of the client request identified due to concurrency */
+		/* calling here may not be followed by the printout of the client request identified due to concurrency; not thread-safe */
 		identify_client((SA *) &clientaddr, clientlen);
 
     	Pthread_create(&tid, NULL, thread, client_connfdp);
@@ -145,20 +147,23 @@ int main(int argc, char **argv)
  * version HTTP/1.0. 
  */
 /* $begin readparse_request */
-int readparse_request(int fd, char *targethost, char *path, char *port, char *request_method, char *request_toserver, rio_t *rp)
+int readparse_request(int fd, char *targethost, char *path, char *port, char *request_method, char *request_toserver, rio_t *rp, char *url_ptr)
 {
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
 
     /* clear caller buffers */
-    strcpy(path, ""); strcpy(targethost, ""); strcpy(port, ""); strcpy(request_method, "");
+    strcpy(path, ""); strcpy(targethost, ""); strcpy(port, ""); strcpy(request_method, ""); /* strcpy(url_ptr, ""); */
 
     /* Read request line and headers */
     Rio_readinitb(rp, fd);
     if (!Rio_readlineb_w(rp, buf, MAXLINE))  
         return 0; /* nothing to read */
 
-    sscanf(buf, "%s %s %s", method, uri, version);  
-    printf("PROXY: Request of method [%s] received from client:\n%s", method, buf);    
+    sscanf(buf, "%s %s %s", method, uri, version); 
+
+	// url_ptr = (char *) realloc((void *)url_ptr, strlen(uri)); /* reallocating causes ptr maintenance issues */
+    strcpy(url_ptr, uri);     
+    // printf("PROXY: Request of method [%s] received from client:\n%s", method, buf);    
     if (/*strcasecmp(method, "GET") != 0*/ !strstr(method,"GET")) {   
         printf("PROXY: Request of method [%s] not implemented; ignored.\n", method);    
         return -1;
@@ -219,7 +224,7 @@ void parse_url(char *url, char *host, char *abs_path, char *port)
 void send_request(int server_connfd, char *request_toserver, char *targethost, rio_t *rio_client) 
 {
 	char buf[MAXLINE], buf_client[MAXLINE], proxy_toserver[MAXLINE], client_toserver[MAXLINE];
-	printf("Request sent by proxy, to client:\n%s\n", request_toserver);
+	// printf("Request sent by proxy, to client:\n%s\n", request_toserver);
 
     /* override client headers with proxy preference; overtake the rest */
     do
@@ -247,8 +252,8 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
     sprintf(proxy_toserver, "%sProxy-Connection: close\r\n\r\n", proxy_toserver); /* terminate with \r\n\r\n */
     
     /* for debugging */
-    printf("Request headers built by proxy, to server:\n%s", proxy_toserver);
-    printf("Request headers forwarded from client, to server:\n%sEnd of headers.\n\n", client_toserver);
+    // printf("Request headers built by proxy, to server:\n%s", proxy_toserver);
+    // printf("Request headers forwarded from client, to server:\n%sEnd of headers.\n\n", client_toserver);
 
     /* send mandatory headers by proxy, then forward the rest from client. */   
     Rio_writen_w(server_connfd, request_toserver, strlen(request_toserver)); /* request */
@@ -263,22 +268,90 @@ void send_request(int server_connfd, char *request_toserver, char *targethost, r
  * forward_response - forward server's response to client
  */
 /* $begin forward_response */
-void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd)
+void forward_response(rio_t *rio_server, rio_t *rio_client, int server_connfd, int client_connfd, char *url_ptr)
 {
-	int rio_cnt;
-	char server_buf[MAXLINE];
+	int rio_cnt, rio_txt_cnt, obj_bytes, hdr_bytes, content_length, total_size, iter;
+	char *proxy_buf, *proxy_buf_start;
+	char server_buf[MAXLINE], header_buf[MAXLINE];
+
+	hdr_bytes = 0;
+	obj_bytes = 0;
+	content_length = 0;
+	iter = 0;
+	total_size = MAX_OBJECT_SIZE;
+	proxy_buf = Malloc(total_size);
+	proxy_buf_start = proxy_buf;
 
     /* set up rio buffer to read server responses */
     Rio_readinitb(rio_server, server_connfd); 
-	debug_status(rio_server, client_connfd); 
 
-	/* write server response to client */
+	/* read text until end of headers; should be implemented with sequential proxy too */
+	do
+    {
+        rio_txt_cnt = Rio_readlineb_w(rio_server, server_buf, MAXLINE);
+
+        sprintf(header_buf, "%s%s", header_buf, server_buf); 
+
+    	if (strstr(server_buf, "HTTP")) {/* printf("%s\r\n",server_buf); */} 
+
+        /* extract content length of entity body, to compare with count of read bytes*/
+    	if (strstr(server_buf, "Content-Length")) {
+		    sscanf(server_buf, "Content-Length: %d", &content_length);  
+    	} 
+
+    	/* copy whatever is read from the rio server buffer, offset into proxy_buf */
+    	memcpy((void *)(proxy_buf+hdr_bytes), (void *)(server_buf), rio_txt_cnt);
+
+    	/* forward response headers if not cached */
+    	// Rio_writen_w(client_connfd, server_buf, rio_txt_cnt);
+
+    	hdr_bytes+=rio_txt_cnt;
+
+    } while (strcmp(server_buf, "\r\n")); 
+	// printf("Response header: \r\n%sEnd response header.\r\n\r\n", header_buf);
+
+	if (content_length == 0) {
+		/* no info on content length from headers */
+	}
+	else { /* mandatory resize of buffer, whether it is larger or smaller than max object size */
+		total_size = content_length + hdr_bytes; // + 32
+		proxy_buf = (char *) realloc( (void *) proxy_buf, total_size);
+		proxy_buf_start = proxy_buf;
+	}
+
+	/* write server response to client (binary data) */
     while ( (rio_cnt = Rio_readnb_w(rio_server, server_buf, MAXLINE)) != 0 ) {
-    	Rio_writen_w(client_connfd, server_buf, rio_cnt); /* write text to client from server buffer */
 
-    	/* determine end of headers, extract content type/length, service non-GET requests */
-    	// if (!(strcmp(server_buf, "\r\n")) ) {}        	}
+    	/* write raw bytes to client from server buffer if no caching */
+    	// Rio_writen_w(client_connfd, server_buf, rio_cnt); 
+
+    	if ( (content_length == 0) && ((obj_bytes+rio_cnt/*+hdr_bytes*/) > MAX_OBJECT_SIZE) ) {
+    		printf("ERROR: Undetected oversize object. (to be implemented) Resize buffer; don't cache.\n");
+    		exit(0); /* to avoid overwriting a buffer  */
+    	}
+
+    	/* copy whatever binary is read from the rio server buffer, offset into proxy_buf */
+    	memcpy((void *)(proxy_buf+obj_bytes+hdr_bytes), (void *)(server_buf), rio_cnt);
+
+    	/* calculate object size per read */
+    	obj_bytes+=rio_cnt;
+    	iter++;
     }
+
+	// printf("Content-Length [%d], obj_bytes [%d], hdr_bytes [%d], iter [%d]\n", content_length, obj_bytes, hdr_bytes, iter);
+
+	/* write raw bytes to client from proxy buffer; no sync issues - server2proxy2client */
+	Rio_writen_w(client_connfd, proxy_buf, total_size); 
+
+	/* only cache objects whose obj_bytes are within size limit; presumably hdr_bytes count as metadata */
+	if (obj_bytes > MAX_OBJECT_SIZE) {
+		Free(proxy_buf); 
+		Free(url_ptr);
+	} 
+	else {
+		/* simplest caching bucketizes each response by its entire URL request */
+		add_cache_entry(proxy_buf, url_ptr, obj_bytes, hdr_bytes);
+	}
 
     return;
 }
@@ -323,7 +396,10 @@ void *thread(void *vargp)
     rio_t rio_client, rio_server; /* or initiate new rio struct in each iteration? */
     char targethost[MAXLINE], path[MAXLINE], 
     			request_toserver[MAXLINE], server_buf[MAXLINE], server_port[8],
-    			request_method[64];
+    			request_method[64]/*, url_ptr[MAXLINE]*/;
+    char *url_ptr = Malloc(MAXLINE);
+
+    cache_entry_t *cached_entry;
 
 	Pthread_detach(pthread_self()); /* free memory by kernel once thread terminates */
 	Free(vargp);
@@ -331,19 +407,31 @@ void *thread(void *vargp)
 	/* service the client */
 	/* set up the client-facing I/O buffer from rio package; extract the host/path/port requested by client */
 	if  (readparse_request(client_connfd, targethost, path, 
-				server_port, request_method, request_toserver, &rio_client) < 0) 
+				server_port, request_method, request_toserver, &rio_client, url_ptr) < 0) {
+		Free(url_ptr);
 		return NULL; /* move on to next request if unsuccessful */
+	} 
+
+	/* if cached, do not connect to server; just copy cached obj to client and return */
+	if ((cached_entry = lookup_cache_entry(url_ptr)) != NULL) {
+	    // printf("\n\nRequest cached.\nEntire url_ptr as obtained by lookup_cache_entry():%s\n\n", cached_entry->url);
+		Rio_writen_w(client_connfd, cached_entry->buf, cached_entry->obj_size + cached_entry->hdr_size); 
+		Free(url_ptr);
+		Close(client_connfd);
+		return NULL;
+	}
+
 
 	/* proxy performs a client role: connect to the server */
 	if ((server_connfd = Open_clientfd(targethost, server_port)) < 0)
 		return NULL; /* move on to next request if unsuccessful */
 
-	/* send request, check and modify mandatory headers then send all headers to server */  
+	/* send request, check and modify mandatory headers then send all client headers to server */  
+	printf("\n\nRequest not cached, contact server.\n");
 	send_request(server_connfd, request_toserver, targethost, &rio_client);
 
-	/* set up server-facing I/O buffer; write server response to client */
-	forward_response(&rio_server, &rio_client, server_connfd, client_connfd);
-
+	/* set up server-facing I/O buffer; write server response to client; cache response if possible */
+	forward_response(&rio_server, &rio_client, server_connfd, client_connfd, url_ptr);
 
 	Close(server_connfd);
 	Close(client_connfd);

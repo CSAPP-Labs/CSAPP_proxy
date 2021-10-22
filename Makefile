@@ -16,14 +16,14 @@ csapp.o: csapp.c csapp.h
 io_wrappers.o: io_wrappers.c io_wrappers.h
 	$(CC) $(CFLAGS) -c io_wrappers.c
 	
-# cache.o: cache.c cache.h
-# 	$(CC) $(CFLAGS) -c cache.c	
+cache.o: cache.c cache.h
+	$(CC) $(CFLAGS) -c cache.c	
 
-proxy.o: proxy.c csapp.h io_wrappers.h
+proxy.o: proxy.c csapp.h io_wrappers.h cache.h
 	$(CC) $(CFLAGS) -c proxy.c
 
-proxy: proxy.o csapp.o io_wrappers.o
-	$(CC) $(CFLAGS) proxy.o csapp.o io_wrappers.o -o proxy $(LDFLAGS)
+proxy: proxy.o csapp.o io_wrappers.o cache.o
+	$(CC) $(CFLAGS) proxy.o csapp.o io_wrappers.o cache.o -o proxy $(LDFLAGS)
 
 # Creates a tarball in ../proxylab-handin.tar that you can then
 # hand in. DO NOT MODIFY THIS!
