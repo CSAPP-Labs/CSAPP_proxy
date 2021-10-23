@@ -19,7 +19,7 @@ io_wrappers.o: io_wrappers.c io_wrappers.h
 cache.o: cache.c cache.h
 	$(CC) $(CFLAGS) -c cache.c	
 
-proxy.o: proxy.c csapp.h io_wrappers.h cache.h
+proxy.o: proxy.c proxy.h csapp.h io_wrappers.h cache.h
 	$(CC) $(CFLAGS) -c proxy.c
 
 proxy: proxy.o csapp.o io_wrappers.o cache.o
